@@ -1,310 +1,192 @@
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
-from fastapi.responses import FileResponse
-from kafka import KafkaProducer, KafkaConsumer
+# main.py
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Dict
 import json
-import os
-import uuid
-import hashlib
-import time
+import logging
+from datetime import datetime
 
-app = FastAPI(title="Kafka File Streaming Service")
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9093")
-FILE_CHUNK_TOPIC = "file-chunks"
-FILE_METADATA_TOPIC = "file-metadata"
-CHUNK_SIZE = 1024 * 1024  # 1MB chunks
-UPLOAD_DIR = "uploads"
-DOWNLOAD_DIR = "downloads"
+app = FastAPI(title="Checkmark Collaboration API")
 
-# Ensure directories exist
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+# CORS configuration - allow Next.js dev server
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Store for tracking file transfers
-file_transfers = {}
-
-
-def get_producer():
-    """Create Kafka producer with proper configuration"""
-    return KafkaProducer(
-        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-        value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-        max_request_size=10485760,  # 10MB
-        compression_type='gzip'
-    )
+# Store active connections per workspace
+# Format: {workspace_id: {user_id: websocket}}
+connections: Dict[str, Dict[str, WebSocket]] = {}
 
 
-def get_consumer(topic: str, group_id: str):
-    """Create Kafka consumer"""
-    return KafkaConsumer(
-        topic,
-        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-        value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-        group_id=group_id,
-        auto_offset_reset='earliest',
-        enable_auto_commit=True
-    )
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, Dict[str, WebSocket]] = {}
 
-
-def calculate_md5(file_path: str) -> str:
-    """Calculate MD5 hash of a file"""
-    hash_md5 = hashlib.md5()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
-
-
-async def stream_file_to_kafka(file_path: str, file_id: str, original_filename: str):
-    """Stream file chunks to Kafka"""
-    producer = get_producer()
-    
-    try:
-        file_size = os.path.getsize(file_path)
-        total_chunks = (file_size // CHUNK_SIZE) + (1 if file_size % CHUNK_SIZE else 0)
+    async def connect(self, websocket: WebSocket, workspace_id: str, user_id: str):
+        """Accept and store a new WebSocket connection"""
+        await websocket.accept()
         
-        # Send metadata
-        metadata = {
-            "file_id": file_id,
-            "original_filename": original_filename,
-            "file_size": file_size,
-            "total_chunks": total_chunks,
-            "chunk_size": CHUNK_SIZE,
-            "md5_hash": calculate_md5(file_path),
-            "timestamp": time.time()
-        }
+        if workspace_id not in self.active_connections:
+            self.active_connections[workspace_id] = {}
         
-        producer.send(FILE_METADATA_TOPIC, metadata)
-        
-        # Update tracking
-        file_transfers[file_id] = {
-            "status": "uploading",
-            "total_chunks": total_chunks,
-            "uploaded_chunks": 0,
-            "metadata": metadata
-        }
-        
-        # Stream file chunks
-        with open(file_path, 'rb') as f:
-            chunk_num = 0
-            while True:
-                chunk_data = f.read(CHUNK_SIZE)
-                if not chunk_data:
-                    break
+        self.active_connections[workspace_id][user_id] = websocket
+        logger.info(f"User {user_id} connected to workspace {workspace_id}")
+        logger.info(f"Total connections in workspace: {len(self.active_connections[workspace_id])}")
+
+    def disconnect(self, workspace_id: str, user_id: str):
+        """Remove a WebSocket connection"""
+        if workspace_id in self.active_connections:
+            if user_id in self.active_connections[workspace_id]:
+                del self.active_connections[workspace_id][user_id]
+                logger.info(f"User {user_id} disconnected from workspace {workspace_id}")
                 
-                chunk_message = {
-                    "file_id": file_id,
-                    "chunk_number": chunk_num,
-                    "total_chunks": total_chunks,
-                    "data": chunk_data.hex(),  # Convert bytes to hex string
-                    "size": len(chunk_data)
-                }
-                
-                future = producer.send(FILE_CHUNK_TOPIC, chunk_message)
-                future.get(timeout=10)  # Wait for confirmation
-                
-                chunk_num += 1
-                file_transfers[file_id]["uploaded_chunks"] = chunk_num
-                
-                # Simulate some processing time
-                time.sleep(0.01)
+                # Clean up empty workspaces
+                if not self.active_connections[workspace_id]:
+                    del self.active_connections[workspace_id]
+                    logger.info(f"Workspace {workspace_id} is now empty")
+
+    async def broadcast(self, workspace_id: str, message: dict, exclude_user: str = None):
+        """Send message to all users in a workspace except the sender"""
+        if workspace_id not in self.active_connections:
+            return
+
+        dead_connections = []
         
-        producer.flush()
-        file_transfers[file_id]["status"] = "completed"
+        for user_id, websocket in self.active_connections[workspace_id].items():
+            if user_id == exclude_user:
+                continue
+                
+            try:
+                await websocket.send_json(message)
+            except Exception as e:
+                logger.error(f"Error sending to {user_id}: {e}")
+                dead_connections.append(user_id)
         
-    except Exception as e:
-        file_transfers[file_id]["status"] = "failed"
-        file_transfers[file_id]["error"] = str(e)
-        raise
-    finally:
-        producer.close()
+        # Clean up dead connections
+        for user_id in dead_connections:
+            self.disconnect(workspace_id, user_id)
+
+    async def send_personal(self, workspace_id: str, user_id: str, message: dict):
+        """Send message to a specific user"""
+        if workspace_id in self.active_connections:
+            if user_id in self.active_connections[workspace_id]:
+                try:
+                    await self.active_connections[workspace_id][user_id].send_json(message)
+                except Exception as e:
+                    logger.error(f"Error sending personal message to {user_id}: {e}")
+                    self.disconnect(workspace_id, user_id)
+
+
+manager = ConnectionManager()
 
 
 @app.get("/")
 async def root():
+    """Health check endpoint"""
     return {
-        "service": "Kafka File Streaming Service",
-        "endpoints": {
-            "upload": "POST /upload",
-            "download": "GET /download/{file_id}",
-            "status": "GET /status/{file_id}",
-            "list": "GET /files"
-        }
+        "status": "online",
+        "service": "Checkmark Collaboration API",
+        "timestamp": datetime.now().isoformat()
     }
 
 
-@app.post("/upload")
-async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """Upload a large file and stream it to Kafka"""
+@app.get("/workspaces/{workspace_id}/stats")
+async def workspace_stats(workspace_id: str):
+    """Get current stats for a workspace"""
+    if workspace_id in manager.active_connections:
+        users = list(manager.active_connections[workspace_id].keys())
+        return {
+            "workspace_id": workspace_id,
+            "connected_users": len(users),
+            "user_ids": users
+        }
+    return {
+        "workspace_id": workspace_id,
+        "connected_users": 0,
+        "user_ids": []
+    }
+
+
+@app.websocket("/ws/{workspace_id}")
+async def websocket_endpoint(websocket: WebSocket, workspace_id: str, userId: str):
+    """
+    WebSocket endpoint for real-time collaboration
     
-    # Generate unique file ID
-    file_id = str(uuid.uuid4())
-    upload_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
+    Query params:
+    - userId: User identifier
+    
+    Message format:
+    {
+        "type": "presence_join" | "presence_leave" | "cursor_move" | "chart_update",
+        "payload": { ... },
+        "userId": "user-id",
+        "workspaceId": "workspace-id",
+        "timestamp": 1234567890
+    }
+    """
+    await manager.connect(websocket, workspace_id, userId)
     
     try:
-        # Save uploaded file temporarily
-        with open(upload_path, 'wb') as f:
-            while chunk := await file.read(1024 * 1024):  # Read in 1MB chunks
-                f.write(chunk)
+        # Send welcome message
+        await websocket.send_json({
+            "type": "connection_established",
+            "payload": {
+                "userId": userId,
+                "workspaceId": workspace_id,
+                "message": "Connected successfully"
+            },
+            "userId": "system",
+            "workspaceId": workspace_id,
+            "timestamp": int(datetime.now().timestamp() * 1000)
+        })
         
-        # Stream to Kafka in background
-        background_tasks.add_task(
-            stream_file_to_kafka,
-            upload_path,
-            file_id,
-            file.filename
-        )
-        
-        return {
-            "file_id": file_id,
-            "filename": file.filename,
-            "message": "File upload initiated. Streaming to Kafka...",
-            "status_url": f"/status/{file_id}"
-        }
-        
-    except Exception as e:
-        if os.path.exists(upload_path):
-            os.remove(upload_path)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/status/{file_id}")
-async def get_upload_status(file_id: str):
-    """Check the status of a file transfer"""
-    
-    if file_id not in file_transfers:
-        raise HTTPException(status_code=404, detail="File transfer not found")
-    
-    transfer_info = file_transfers[file_id]
-    
-    progress = 0
-    if transfer_info["total_chunks"] > 0:
-        progress = (transfer_info["uploaded_chunks"] / transfer_info["total_chunks"]) * 100
-    
-    return {
-        "file_id": file_id,
-        "status": transfer_info["status"],
-        "progress": f"{progress:.2f}%",
-        "uploaded_chunks": transfer_info["uploaded_chunks"],
-        "total_chunks": transfer_info["total_chunks"],
-        "metadata": transfer_info.get("metadata", {})
-    }
-
-
-@app.get("/consume/{file_id}")
-async def consume_file(file_id: str, background_tasks: BackgroundTasks):
-    """Consume file chunks from Kafka and reconstruct the file"""
-    
-    def reconstruct_file():
-        consumer = get_consumer(FILE_CHUNK_TOPIC, f"file-consumer-{file_id}")
-        metadata_consumer = get_consumer(FILE_METADATA_TOPIC, f"metadata-consumer-{file_id}")
-        
-        try:
-            # Get metadata
-            metadata = None
-            for message in metadata_consumer:
-                meta = message.value
-                if meta["file_id"] == file_id:
-                    metadata = meta
-                    break
+        # Listen for messages
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
             
-            if not metadata:
-                return
+            logger.info(f"Received {message.get('type')} from {userId} in {workspace_id}")
             
-            # Reconstruct file from chunks
-            output_path = os.path.join(DOWNLOAD_DIR, f"{file_id}_{metadata['original_filename']}")
-            chunks_received = {}
+            # Broadcast to other users in the workspace
+            await manager.broadcast(
+                workspace_id=workspace_id,
+                message=message,
+                exclude_user=userId
+            )
             
-            for message in consumer:
-                chunk = message.value
-                
-                if chunk["file_id"] == file_id:
-                    chunks_received[chunk["chunk_number"]] = bytes.fromhex(chunk["data"])
-                    
-                    # Check if we have all chunks
-                    if len(chunks_received) == metadata["total_chunks"]:
-                        # Write file in order
-                        with open(output_path, 'wb') as f:
-                            for i in range(metadata["total_chunks"]):
-                                f.write(chunks_received[i])
-                        
-                        # Verify integrity
-                        reconstructed_hash = calculate_md5(output_path)
-                        if reconstructed_hash == metadata["md5_hash"]:
-                            file_transfers[file_id]["download_status"] = "completed"
-                            file_transfers[file_id]["download_path"] = output_path
-                        else:
-                            file_transfers[file_id]["download_status"] = "failed"
-                            file_transfers[file_id]["error"] = "MD5 hash mismatch"
-                        break
-                        
-        finally:
-            consumer.close()
-            metadata_consumer.close()
-    
-    background_tasks.add_task(reconstruct_file)
-    
-    return {
-        "message": "File reconstruction started",
-        "file_id": file_id
-    }
-
-
-@app.get("/download/{file_id}")
-async def download_file(file_id: str):
-    """Download the reconstructed file"""
-    
-    if file_id not in file_transfers:
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    transfer = file_transfers[file_id]
-    
-    if "download_path" not in transfer:
-        raise HTTPException(status_code=404, detail="File not yet reconstructed. Try /consume/{file_id} first")
-    
-    if not os.path.exists(transfer["download_path"]):
-        raise HTTPException(status_code=404, detail="File not found on disk")
-    
-    return FileResponse(
-        transfer["download_path"],
-        filename=transfer["metadata"]["original_filename"]
-    )
-
-
-@app.get("/files")
-async def list_files():
-    """List all tracked file transfers"""
-    return {
-        "files": [
-            {
-                "file_id": fid,
-                "status": info["status"],
-                "filename": info.get("metadata", {}).get("original_filename", "unknown"),
-                "progress": f"{(info['uploaded_chunks'] / info['total_chunks'] * 100):.2f}%" if info["total_chunks"] > 0 else "0%"
+    except WebSocketDisconnect:
+        manager.disconnect(workspace_id, userId)
+        
+        # Notify others that user left
+        await manager.broadcast(
+            workspace_id=workspace_id,
+            message={
+                "type": "presence_leave",
+                "payload": {"userId": userId},
+                "userId": userId,
+                "workspaceId": workspace_id,
+                "timestamp": int(datetime.now().timestamp() * 1000)
             }
-            for fid, info in file_transfers.items()
-        ]
-    }
+        )
+    except Exception as e:
+        logger.error(f"WebSocket error for {userId} in {workspace_id}: {e}")
+        manager.disconnect(workspace_id, userId)
 
 
-@app.delete("/files/{file_id}")
-async def delete_file(file_id: str):
-    """Delete a file and its tracking data"""
-    
-    if file_id not in file_transfers:
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    # Clean up files
-    upload_pattern = os.path.join(UPLOAD_DIR, f"{file_id}_*")
-    download_pattern = os.path.join(DOWNLOAD_DIR, f"{file_id}_*")
-    
-    import glob
-    for pattern in [upload_pattern, download_pattern]:
-        for filepath in glob.glob(pattern):
-            if os.path.exists(filepath):
-                os.remove(filepath)
-    
-    # Remove tracking
-    del file_transfers[file_id]
-    
-    return {"message": "File deleted successfully"}
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        # reload=True,  # Auto-reload on code changes
+        log_level="info"
+    )

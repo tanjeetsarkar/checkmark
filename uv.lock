@@ -58,8 +58,10 @@ dependencies = [
     { name = "aiofiles" },
     { name = "fastapi", extra = ["all"] },
     { name = "kafka-python" },
+    { name = "pydantic" },
     { name = "python-multipart" },
     { name = "uvicorn" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -67,8 +69,10 @@ requires-dist = [
     { name = "aiofiles", specifier = ">=25.1.0" },
     { name = "fastapi", extras = ["all"], specifier = ">=0.124.0" },
     { name = "kafka-python", specifier = ">=2.3.0" },
+    { name = "pydantic", specifier = ">=2.12.5" },
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "uvicorn", specifier = ">=0.38.0" },
+    { name = "websockets", specifier = ">=15.0.1" },
 ]
 
 [[package]]

@@ -8,6 +8,8 @@ dependencies = [
     "aiofiles>=25.1.0",
     "fastapi[all]>=0.124.0",
     "kafka-python>=2.3.0",
+    "pydantic>=2.12.5",
     "python-multipart>=0.0.20",
     "uvicorn>=0.38.0",
+    "websockets>=15.0.1",
 ]

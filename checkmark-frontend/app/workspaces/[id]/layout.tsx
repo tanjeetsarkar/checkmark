@@ -1,6 +1,8 @@
+// app/workspaces/[id]/layout.tsx
 import { notFound } from 'next/navigation';
-import { getWorkspaceById } from '@/lib/api/mock-data';
+import { workspaceAPI } from '@/lib/api/python-client';
 import Image from 'next/image';
+import type { Workspace } from '@/types/api';
 
 interface WorkspaceLayoutProps {
   children: React.ReactNode;
@@ -16,9 +18,11 @@ export default async function WorkspaceLayout({
   params,
 }: WorkspaceLayoutProps) {
   const { id } = await params;
-  const workspace = await getWorkspaceById(id);
-
-  if (!workspace) {
+  
+  let workspace: Workspace;
+  try {
+    workspace = await workspaceAPI.get(id);
+  } catch (error) {
     notFound();
   }
 
@@ -38,7 +42,7 @@ export default async function WorkspaceLayout({
             </div>
             <div className="flex items-center gap-3">
               <Image
-                src={workspace.owner.avatar || '/default-avatar.png'}
+                src={workspace.owner.avatar_url || '/default-avatar.png'}
                 alt={workspace.owner.name}
                 width={32}
                 height={32}

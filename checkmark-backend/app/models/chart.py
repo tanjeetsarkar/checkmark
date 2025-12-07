@@ -6,9 +6,9 @@ import enum
 from app.database import Base
 
 class ChartType(str, enum.Enum):
-    SCATTER_3D = "3d_scatter"
-    BAR_3D = "3d_bar"
-    SURFACE_3D = "3d_surface"
+    SCATTER_3D = "scatter3D"
+    BAR_3D = "bar3D"
+    SURFACE_3D = "surface"
     LINE = "line"
     BAR = "bar"
 

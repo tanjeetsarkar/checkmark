@@ -1,5 +1,6 @@
-import { getWorkspaceById } from '@/lib/api/mock-data';
+import { workspaceAPI } from '@/lib/api/python-client';
 import Image from 'next/image';
+import type { Workspace, WorkspaceMember } from '@/types/api';
 
 interface SidebarProps {
   params: Promise<{ id: string }>;
@@ -7,7 +8,7 @@ interface SidebarProps {
 
 export default async function WorkspaceSidebar({ params }: SidebarProps) {
   const { id } = await params;
-  const workspace = await getWorkspaceById(id);
+  const workspace: Workspace = await workspaceAPI.get(id);
 
   if (!workspace) return null;
 
@@ -17,53 +18,36 @@ export default async function WorkspaceSidebar({ params }: SidebarProps) {
       <div className="mb-8">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Members</h2>
         <div className="space-y-3">
-          {/* Owner */}
-          <div className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50">
-            <Image
-              src={workspace.owner.avatar || '/default-avatar.png'}
-              alt={workspace.owner.name}
-              width={40}
-              height={40}
-              unoptimized
-              className="rounded-full"
-            />
-            <div className="flex-1">
-              <p className="text-sm font-medium text-gray-900">
-                {workspace.owner.name}
-              </p>
-              <p className="text-xs text-gray-500">{workspace.owner.email}</p>
-            </div>
-            <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-1 rounded">
-              Owner
-            </span>
-          </div>
-
-          {/* Other Members */}
-          {workspace.members.length > 0 ? (
-            workspace.members.map((member) => (
-              <div
-                key={member.id}
-                className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50"
-              >
-                <Image
-                  src={member.avatar || '/default-avatar.png'}
-                  alt={member.name}
-                  width={40}
-                  height={40}
-                  unoptimized
-                  className="rounded-full"
-                />
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-gray-900">
-                    {member.name}
-                  </p>
-                  <p className="text-xs text-gray-500">{member.email}</p>
-                </div>
+          {workspace.members.map((member: WorkspaceMember) => (
+            <div
+              key={member.id}
+              className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50"
+            >
+              <Image
+                src={member.user.avatar_url || '/default-avatar.png'}
+                alt={member.user.name}
+                width={40}
+                height={40}
+                unoptimized
+                className="rounded-full"
+              />
+              <div className="flex-1">
+                <p className="text-sm font-medium text-gray-900">
+                  {member.user.name}
+                </p>
+                <p className="text-xs text-gray-500">{member.user.email}</p>
               </div>
-            ))
-          ) : (
-            <p className="text-sm text-gray-500 italic">No other members yet</p>
-          )}
+              <span className={`text-xs px-2 py-1 rounded ${
+                member.role === 'owner' 
+                  ? 'bg-indigo-100 text-indigo-700'
+                  : member.role === 'editor'
+                  ? 'bg-blue-100 text-blue-700'
+                  : 'bg-gray-100 text-gray-700'
+              }`}>
+                {member.role}
+              </span>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -76,7 +60,7 @@ export default async function WorkspaceSidebar({ params }: SidebarProps) {
           <div>
             <p className="text-gray-500">Created</p>
             <p className="text-gray-900 font-medium">
-              {new Date(workspace.createdAt).toLocaleDateString('en-US', {
+              {new Date(workspace.created_at).toLocaleDateString('en-US', {
                 month: 'long',
                 day: 'numeric',
                 year: 'numeric',
@@ -86,7 +70,7 @@ export default async function WorkspaceSidebar({ params }: SidebarProps) {
           <div>
             <p className="text-gray-500">Last Updated</p>
             <p className="text-gray-900 font-medium">
-              {new Date(workspace.updatedAt).toLocaleDateString('en-US', {
+              {new Date(workspace.updated_at).toLocaleDateString('en-US', {
                 month: 'long',
                 day: 'numeric',
                 year: 'numeric',

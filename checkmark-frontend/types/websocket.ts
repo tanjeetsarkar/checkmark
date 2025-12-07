@@ -1,5 +1,3 @@
-// types/websocket.ts
-
 export interface PresenceUser {
   id: string;
   name: string;
